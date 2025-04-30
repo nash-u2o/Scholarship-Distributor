@@ -1,1 +1,1 @@
-# scholarship_distributer_v2
+# Scholarship-Distributor
