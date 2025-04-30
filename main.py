@@ -1,10 +1,12 @@
 # Note on the dictionary created: if identifiers are the same, the existing/old value is overidden
 # Note on unrestricted in the excel file: don't use it unless you want to create logic using custom matching. In the excel file, just make all cells with unrestricted empty
+# BUG: This works but there is bug when columns have the same name. If I compare scholarship column a to student column b, but student also has a column named the same as a, this will cause the program to crash
 
 import csv
 import os
 import re
-import sys
+import traceback
+import warnings
 
 import networkx as nx
 import pandas as pd
@@ -29,6 +31,8 @@ def preprocess_scholarships(
     scholarships = {}
 
     for index, row in rows:
+        if int(row[amount_identifier]) <= 0:
+            continue
         schol_identifier = row[identifier]
 
         scholarships[schol_identifier] = {}
@@ -65,8 +69,9 @@ def preprocess_students(
     identifier: str, cap_identifier: str, compare_dict: dict, data: pd.DataFrame
 ) -> dict:
     # Fill nan columns with empty space
-    # Deal with deprecation warning
-    data.fillna(value="", inplace=True)
+    data.fillna(
+        value="", inplace=True
+    )  # Just ignore the deprecation warning until it's actually a problem
     rows = data.iterrows()
     students = {}
 
@@ -144,47 +149,69 @@ def create_edges(
     compare_dict: dict,
     graph: nx.Graph,
 ) -> list[nx.Graph]:
-    # print(schol_dict)
-    # print("\n\n\n\n\n\n\n\n\n")
-    # print(stu_dict)
-    qualified = True
     columns = compare_dict.keys()
+
     for scholarship in schol_dict:
         for student in stu_dict:
-            qualified = True
+            qualified = True  # Assume the pair is qualified initially
+
             for col in columns:
                 if col in schol_dict[scholarship].keys():
                     student_val = stu_dict[student][col]
+                    scholarship_values = schol_dict[scholarship][col]
+
+                    # Custom comparison
                     if compare_dict[col]["comparison"] == "custom":
                         qualified = custom_matching(
                             stu_dict, student, schol_dict, scholarship, col
                         )
-                    elif compare_dict[col]["comparison"] == "greater":
-                        if student_val < schol_dict[scholarship][col]:
-                            qualified = False
-                    elif compare_dict[col]["comparison"] == "lesser":
-                        if student_val > schol_dict[scholarship][col]:
-                            qualified = False
-                    else:
-                        scholarship_values = schol_dict[scholarship][col]
-                        if student_val not in scholarship_values:
-                            qualified = False
+                        if not qualified:
+                            break  # Disqualify immediately
 
-            if qualified == True:
+                    # Greater comparison
+                    elif compare_dict[col]["comparison"] == "greater":
+                        try:
+                            if float(student_val) < float(scholarship_values):
+                                qualified = False
+                                break  # Disqualify immediately
+                        except ValueError:
+                            qualified = False
+                            break
+
+                    # Lesser comparison
+                    elif compare_dict[col]["comparison"] == "lesser":
+                        try:
+                            if float(student_val) > float(scholarship_values):
+                                qualified = False
+                                break  # Disqualify immediately
+                        except ValueError:
+                            qualified = False
+                            break
+
+                    # Exact comparison
+                    else:  # Default to "exact"
+                        if isinstance(scholarship_values, list):
+                            if student_val not in scholarship_values:
+                                qualified = False
+                                break  # Disqualify immediately
+                        else:
+                            if student_val != scholarship_values:
+                                qualified = False
+                                break  # Disqualify immediately
+
+            # If qualified, add an edge to the graph
+            if qualified:
                 scholarship_amount = schol_dict[scholarship][amount_identifier]
                 remaining_student_scholarship = stu_dict[student][cap_identifier]
-                weight = (
-                    scholarship_amount
-                    if remaining_student_scholarship > scholarship_amount
-                    else remaining_student_scholarship
-                )
+                weight = min(scholarship_amount, remaining_student_scholarship)
+
                 graph.add_edge(
                     student,
                     scholarship,
                     weight=weight,
                 )
 
-    # Remove isolated nodes
+    # Remove isolated nodes (nodes with no edges)
     isolated_nodes = list(nx.isolates(graph))
     graph.remove_nodes_from(isolated_nodes)
 
@@ -209,32 +236,90 @@ def save_csv(headers, data, name: str):
             i += 1
 
 
-def load_file(path: str, custom=False) -> pd.DataFrame:
+import os
+import re
+import traceback
+
+import pandas as pd
+
+
+def load_file(
+    path: str, custom=False
+) -> pd.DataFrame | None:  # Added None to return type hint
     path = re.sub('["]', "", path)
-    file_extension = path[path.find(".") + 1 :]
+    file_extension = ""
+    if "." in path:
+        file_extension = path[path.rfind(".") + 1 :]  # Use rfind for robustness
 
     try:
-        if os.path.exists(path):
-            if "xls" in file_extension:
-                if custom:
-                    data = pd.read_excel(path, header=None)
-                else:
-                    data = pd.read_excel(path)
-            elif "csv" in file_extension:
-                if custom:
-                    data = pd.read_csv(path, header=None)
-                else:
-                    data = pd.read_csv(path)
-            else:
-                print("Unsupported file type")
-                return None
+        data = None
+        print(
+            f"Attempting to load: {path} (Extension: {file_extension}, Custom: {custom})"
+        )
 
-            return data
+        if "xls" in file_extension:  # Covers .xls and .xlsx
+            if custom:
+                data = pd.read_excel(path, header=None)
+            else:
+                data = pd.read_excel(path)  # Default header inference
+        elif "csv" in file_extension:
+            if custom:
+                # Try common encodings for header=None case too
+                try:
+                    data = pd.read_csv(path, header=None)
+                except UnicodeDecodeError:
+                    try:
+                        data = pd.read_csv(path, header=None, encoding="latin1")
+                    except UnicodeDecodeError:
+                        data = pd.read_csv(path, header=None, encoding="cp1252")
+            else:
+                # Try default UTF-8, then latin1, then cp1252
+                try:
+                    data = pd.read_csv(path)
+                    print("Info: Successfully loaded with default UTF-8 encoding.")
+                except UnicodeDecodeError:
+                    print("Info: UTF-8 decoding failed. Trying 'latin1'...")
+                    try:
+                        data = pd.read_csv(path, encoding="latin1")
+                        print("Info: Successfully loaded with 'latin1' encoding.")
+                    except UnicodeDecodeError:
+                        print("Info: 'latin1' decoding failed. Trying 'cp1252'...")
+                        try:
+                            data = pd.read_csv(path, encoding="cp1252")  # Try cp1252
+                            print("Info: Successfully loaded with 'cp1252' encoding.")
+                        except UnicodeDecodeError as ude_final:
+                            # Re-raise if all common encodings fail
+                            print(
+                                "Error: All attempted encodings (UTF-8, latin1, cp1252) failed."
+                            )
+                            raise ude_final  # Re-raise the last error to be caught below
         else:
-            print("File does not exist")
-            return None
-    except:
-        print("Error while loading file")
+            print(f"Error: Unsupported file type '{file_extension}' for path: {path}")
+            return None  # Return None for unsupported type
+
+        # If data is successfully loaded by this point
+        print("File loaded successfully into DataFrame.")
+        return data
+
+    # --- Exception Handling Block ---
+    except FileNotFoundError:
+        print(f"Error: File not found at the specified path: '{path}'")
+        # traceback.print_exc() # Uncomment for full traceback if needed
+        return None  # Return None on error
+    except UnicodeDecodeError as ude:  # Catch the error if all CSV encodings failed
+        print(f"Error: Final encoding issue loading CSV '{path}'.")
+        print(f"Specific error: {ude}")
+        # traceback.print_exc() # Uncomment for full traceback if needed
+        return None  # Return None on error
+    except Exception as e:
+        # Catch any other unexpected exceptions during loading
+        print(f"An unexpected error occurred while loading file: {path}")
+        print(f"Error Type: {type(e).__name__}")
+        print(f"Error Details: {e}")
+        print("-" * 20 + " Full Traceback " + "-" * 20)
+        traceback.print_exc()  # Print the full traceback
+        print("-" * 54)
+        return None  # Return None on error
 
 
 # Need a way to identify column to identify students
@@ -242,6 +327,10 @@ def load_file(path: str, custom=False) -> pd.DataFrame:
 * Process scholarship data. How will the comparisons be happening? Well, indexing a scholarship attribute should give acceptable student values
 """
 if __name__ == "__main__":
+    warnings.simplefilter(
+        action="ignore", category=FutureWarning
+    )  # Suppress the pandas warning
+
     schol_data = None
     stu_data = None
 
@@ -269,133 +358,55 @@ if __name__ == "__main__":
 
     print()  # Add spacing before the next section
 
-    # Get scholarship identifier
-    while True:
-        print(f"Scholarship Columns: {[x for x in schol_columns]}")
-        schol_identifier = input(
-            "For the scholarship file, enter the name of the column that contains the desired identifier (name, scholarship code, etc): "
-        ).lower()
-        if schol_identifier not in schol_columns:
-            print("ERROR***")
-            print(f"{schol_identifier} is not a column in the scholarship file.\n")
-            print("Please re-enter these columns")
-        else:
-            break
+    schol_identifier = ""
+    amount_identifier = ""
+    stu_identifier = ""
+    cap_identifier = ""
 
-    print()  # Add spacing before the next section
-
-    # Get student identifier
-    while True:
-        print(f"Student Columns: {[x for x in stu_columns]}")
-        stu_identifier = input(
-            "For the student file, enter the name of the column that contains the desired identifier (name, 700#, etc): "
-        ).lower()
-        if stu_identifier not in stu_columns:
-            print("ERROR***")
-            print(f"{stu_identifier} is not a column in the student file.\n")
-            print("Please re-enter these columns")
-
-        else:
-            break
-
-    print()  # Add spacing before the next section
-
-    # Get scholarship amount identifier
-    while True:
-        print(f"Scholarship Columns: {[x for x in schol_columns]}")
-        amount_identifier = input(
-            "For the scholarship file, enter the name of the column that contains the monetary amount of the scholarship: "
-        )
-        if amount_identifier not in schol_columns:
-            print(f"{amount_identifier} is not a column in the scholarship file.\n")
-        else:
-            break
-
-    print()  # Add spacing before the next section
-
-    # Get student cap identifier
-    while True:
-        print(f"Student Columns: {[x for x in stu_columns]}")
-        cap_identifier = input(
-            "For the student file, enter the name of the column indicating the students' scholarship cap: "
-        )
-        if cap_identifier not in stu_columns:
-            print(f"{cap_identifier} is not a column in the student file.\n")
-        else:
-            break
-
-    print()  # Add spacing before the next section
-
-    # Map scholarship columns to student columns
-    col_flag = True
-    while True:
-        print("Type -1 if done\n")
-        print(f"Scholarship Columns: {[x for x in schol_columns]}")
-        schol_column = (
-            input("Enter scholarship column to compare to student column: ")
-            .lower()
-            .strip()
-        )
-        if schol_column == "-1":
-            break
-
-        print(f"Student Columns: {[x for x in stu_columns]}")
-        stu_column = (
-            input("Enter student column to compare to scholarship column: ")
-            .lower()
-            .strip()
-        )
-        if stu_column == "-1":
-            break
-
-        if schol_column not in schol_columns:
-            col_flag = False
-            print(f"{schol_column} is not a column in the scholarship file.\n")
-        if stu_column not in stu_columns:
-            col_flag = False
-            print(f"{stu_column} is not a column in the student file.\n")
-
-        if col_flag:
-            print(f"Comparing {schol_column} to {stu_column}\n")
-            compare_dict[schol_column] = {"student_column": stu_column}
-        else:
-            col_flag = True
-
-    print()  # Add spacing before the next section
-
-    # Get comparison types for columns
-    print("Provide comparison types for columns")
-    print("* Exact: Perform a direct comparison of values in the column")
-    print(
-        "* Greater: See if numeric student value is greater than numeric scholarship val. Ex: Student GPA > Scholarship minimum GPA"
+    # Load the matching file
+    match_path = input(
+        "Provide comparison file for columns. Check the readme for more info on how to structure files for this program: "
     )
-    print("* Lesser: See if numeric student value is less than numeric scholarship val")
-    print("* Custom: Provide a custom comparison excel/csv file")
+
+    print()
+
+    match_data = load_file(match_path, True)
+    match_data = match_data.map(lambda x: x.lower() if isinstance(x, str) else x)
     comparisons = ["exact", "greater", "lesser", "custom"]
+    for _, row in match_data.iterrows():
+        # row[0] is scholarship value, row[1] is student val, and row[2] is comparison type
+        if row[2] == "id":
+            schol_identifier = row[0]
+            stu_identifier = row[1]
+        elif row[2] == "value":
+            amount_identifier = row[0]
+            cap_identifier = row[1]
+        else:
+            if row[2] in comparisons:
+                compare_dict[row[0]] = {"student_column": row[1]}
+                compare_dict[row[0]]["comparison"] = row[2]
+            else:
+                print(f"{row[2]} is not a valid comparison type")
+                quit(-1)
+
+    if any(
+        x == ""
+        for x in [schol_identifier, amount_identifier, stu_identifier, cap_identifier]
+    ):
+        print(
+            "Error. Please ensure the scholarship and student have both a value and id 'comparison' in the matching file"
+        )
+        quit(-1)
 
     for key in compare_dict.keys():
-        comparison = (
-            input(
-                f"What comparison to use for {key} and {compare_dict[key]['student_column']} columns (exact/greater/lesser/custom): "
-            )
-            .lower()
-            .strip()
-        )
-        while comparison not in comparisons:
-            print("Invalid comparison type.\n")
-            comparison = (
-                input(
-                    f"What comparison to use for {key} and {compare_dict[key]['student_column']} columns (exact/greater/lesser/custom)?: "
-                )
-                .lower()
-                .strip()
-            )
-
-        compare_dict[key]["comparison"] = comparison
+        comparison = compare_dict[key]["comparison"]
 
         if comparison == "custom":
             compare_dict[key]["custom_comparison"] = {}
-            comparison_file = input("Provide the comparison file: ")
+            comparison_file = input(
+                f"Provide the comparison file for the scholarship column '{key}': "
+            )
+            print()
             data = load_file(comparison_file, True)
             data.columns = ["scholarship", "student"]
             for index, row in data.iterrows():
@@ -405,6 +416,10 @@ if __name__ == "__main__":
                     else row["scholarship"]
                 )
                 values = [x.strip().lower() for x in str(row["student"]).split(",")]
+                if (
+                    row["scholarship"].lower() not in values
+                ):  # Also add in the key itself to be safe
+                    values.append(row["scholarship"].lower())
                 compare_dict[key]["custom_comparison"][key_val] = values
 
     print()  # Add spacing before the next section
@@ -424,35 +439,42 @@ if __name__ == "__main__":
         stu_data = stu_data.rename(columns=rename_map)
 
     # Process scholarships and students
+    print("Processing Scholarships...")
     schol_dict = preprocess_scholarships(
         schol_identifier, amount_identifier, schol_data, compare_dict
     )
+    print("Processing Students...")
     stu_dict = preprocess_students(
         stu_identifier, cap_identifier, compare_dict, stu_data
     )
 
-    print("Custom Comparison Dictionary:")
-    print(compare_dict)
-    print("\nProcessed Scholarship Dictionary:")
-    print(schol_dict)
-    print("\nProcessed Student Dictionary:")
-    print(stu_dict)
+    # print("Custom Comparison Dictionary:")
+    # print(compare_dict)
+    # print("\nProcessed Scholarship Dictionary:")
+    # print(schol_dict)
+    # print("\nProcessed Student Dictionary:")
+    # print(stu_dict)
 
     student_names = stu_dict.keys()
     scholarship_names = schol_dict.keys()
     match_dict = {name: [] for name in student_names}
+    schol_dict_copy = schol_dict.copy()
+    stu_dict_copy = stu_dict.copy()
     flag = True
-    while flag:
-        graph = create_nodes(stu_dict, schol_dict)
-        subgraphs = create_edges(
-            stu_dict, cap_identifier, schol_dict, amount_identifier, compare_dict, graph
-        )
 
-        print(len(subgraphs))
-        if not subgraphs:
-            flag = False
-            break
-
+    print("Creating the Graph...")
+    graph = create_nodes(stu_dict_copy, schol_dict_copy)
+    subgraphs = create_edges(
+        stu_dict_copy,
+        cap_identifier,
+        schol_dict_copy,
+        amount_identifier,
+        compare_dict,
+        graph,
+    )
+    print("Matching...")
+    total = 0
+    while True:
         empty_count = 0
         for g in subgraphs:
             matchings = max_weight_matching(g)
@@ -474,25 +496,70 @@ if __name__ == "__main__":
                     raise ValueError(
                         "Invalid matching. Student identifier not in initial data."
                     )
-                match_dict[student].append(scholarship)
+                # Calculate the actual amount to be awarded (minimum of scholarship amount and remaining student cap)
+                scholarship_amount = schol_dict_copy[scholarship][amount_identifier]
+                student_remaining_cap = stu_dict_copy[student][cap_identifier]
+                awarded_amount = min(scholarship_amount, student_remaining_cap)
+                match_dict[student].append((scholarship, awarded_amount))
+
+                # Add the awarded amount to our running total
+                total += awarded_amount
 
                 # Adjust student cap, remove student if they can't get anymore money, and remove the matched scholarship
-                stu_dict[student][cap_identifier] -= schol_dict[scholarship][
-                    amount_identifier
-                ]
-                if stu_dict[student][cap_identifier] <= 0:
-                    graph.remove_node(student)
-                    del stu_dict[student]
-                graph.remove_node(scholarship)
-                del schol_dict[scholarship]
+                stu_dict_copy[student][cap_identifier] -= awarded_amount
+                if stu_dict_copy[student][cap_identifier] <= 0:
+                    g.remove_node(student)
+                    del stu_dict_copy[student]
+                if awarded_amount >= schol_dict_copy[scholarship][amount_identifier]:
+                    g.remove_node(scholarship)
+                    del schol_dict_copy[scholarship]
+                else:  # Allow the scholarship to be given out again
+                    schol_dict_copy[scholarship][amount_identifier] -= awarded_amount
 
             # If all graphs are empty there are no matches, so break out
-            if empty_count >= len(subgraphs):
-                flag = False
-                break
+        if empty_count == len(subgraphs):
+            break
+
     print("\n\n\nBlossom Matches")
-    assigned = 0
+    # Initialize list to store data for CSV export
+    csv_data = []
+
+    # Iterate through each student (the aptly named key) in the match dictionary
     for key in match_dict:
-        assigned += len(match_dict[key])
-        if len(match_dict[key]) >= 1:
-            print(f"{key}: {match_dict[key]}")
+
+        # Get the list of (scholarship, amount) tuples for the current student
+        # Use .get() to safely handle cases where a key might be missing or has an empty list
+        scholarship_tuples = match_dict.get(key, [])
+
+        # Proceed only if the student was matched with at least one scholarship
+        if scholarship_tuples:
+
+            # Extract just the names for display/CSV purposes
+            scholarship_names = [
+                f"{item[0]} ({item[1]})" for item in scholarship_tuples
+            ]
+
+            # Calculate the total amount awarded to this student directly from the tuples
+            total_awarded_for_student = sum(item[1] for item in scholarship_tuples)
+
+            # Format scholarship names for the print preview (first 5 + ...)
+            scholarship_names_str_preview = ", ".join(map(str, scholarship_names[:5]))
+            if len(scholarship_names) > 5:
+                scholarship_names_str_preview += ", ..."
+
+            # Print the summary for this student
+            print(
+                f"{key:<15} {scholarship_names_str_preview:<40} Total: {total_awarded_for_student}"
+            )
+
+            # Prepare data row for CSV: Student ID, full comma-separated list of names, total amount
+            full_scholarship_names_str = ", ".join(map(str, scholarship_names))
+            csv_data.append(
+                [key, full_scholarship_names_str, total_awarded_for_student]
+            )
+
+    headers = ("Student", "Matched_Scholarships", "Total_Amount")
+
+    print(total)
+
+    save_csv(headers, csv_data, "blossom_matches")
