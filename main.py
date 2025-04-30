@@ -166,33 +166,6 @@ def preprocess_students(
     return students
 
 
-""""
-For reference, this is what data inside of compare_dict looks like:
-"scholarship_column_name": {
-    "student_column": "corresponding_student_column_name",
-    "comparison": "comparison_type",
-    # Only present if comparison type is "custom"
-    "custom_comparison": {
-        "key_value": ["matching_value1", "matching_value2", ...],
-        # More key-value pairs...
-    }
-
-This is what schol_dict looks like:
-"scholarship_identifier_1": {
-    "amount_identifier": amount_value,
-    "comparison_column_1": [
-        # For "exact" comparison:
-        ["value1", "value2", "value3"],
-        # OR for "custom" comparison:
-        [
-            ["matching_value1", "matching_value2", ...], 
-        ]
-    ],
-    "comparison_column_2": [...],
-    # More comparison columns...
-"""
-
-
 def custom_matching(
     stu_dict,
     student,
@@ -698,15 +671,12 @@ if __name__ == "__main__":
         # Use .get() to safely handle cases where a key might be missing or has an empty list
         scholarship_tuples = match_dict.get(key, [])
 
-        # Proceed only if the student was matched with at least one scholarship
         if scholarship_tuples:
-
-            # Extract just the names for display/CSV purposes
+            # Create a string containing the scholarship and associated amount for ever assigned scholarship
             scholarship_names = [
                 f"{item[0]} ({item[1]})" for item in scholarship_tuples
             ]
 
-            # Calculate the total amount awarded to this student directly from the tuples
             total_awarded_for_student = sum(item[1] for item in scholarship_tuples)
 
             # Format scholarship names for the print preview (first 5 + ...)
@@ -714,7 +684,6 @@ if __name__ == "__main__":
             if len(scholarship_names) > 5:
                 scholarship_names_str_preview += ", ..."
 
-            # Print the summary for this student
             print(
                 f"{key:<15} {scholarship_names_str_preview:<40} Total: {total_awarded_for_student}"
             )
@@ -727,7 +696,7 @@ if __name__ == "__main__":
 
     headers = ("Student", "Matched_Scholarships", "Total_Amount")
 
-    print(total)
+    print(f"Total amount distributed: {total}")
 
     # Files saved to directory containing the program file
     save_csv(headers, csv_data, "blossom_matches")
