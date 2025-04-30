@@ -1,6 +1,5 @@
 # Note on the dictionary created: if identifiers are the same, the existing/old value is overidden
 # Note on unrestricted in the excel file: don't use it unless you want to create logic using custom matching. In the excel file, just make all cells with unrestricted empty
-# BUG: This works but there is bug when columns have the same name. If I compare scholarship column a to student column b, but student also has a column named the same as a, this will cause the program to crash
 
 import csv
 import os
@@ -8,6 +7,7 @@ import re
 import traceback
 import warnings
 
+import keyboard
 import networkx as nx
 import pandas as pd
 from networkx import max_weight_matching
@@ -20,11 +20,51 @@ def preprocess_scholarships(
     compare_dict: dict,
 ) -> dict:
     """
-    Creates a dictionary of scholarship requirements
+    Processes scholarship data from a DataFrame into a structured dictionary.
+
+    Filters out scholarships with non-positive amounts. For each valid
+    scholarship, it creates a dictionary entry keyed by the scholarship's
+    identifier. This inner dictionary stores the scholarship amount and
+    its requirements based on columns specified in compare_dict.
+    String requirements are split into lists. If a requirement uses
+    "custom" comparison, its values are substituted based on the mappings
+    in compare_dict.
+
+    Args:
+        identifier: The column name in 'data' that uniquely identifies
+                    each scholarship.
+        amount_identifier: The column name in 'data' that specifies the
+                           scholarship amount.
+        data: A pandas DataFrame containing the raw scholarship data.
+        compare_dict: A dictionary detailing how scholarship columns map
+                      to student columns and the comparison logic, including
+                      custom value mappings.
+                      Example structure:
+                      {
+                          "scholarship_col_name": {
+                              "student_column": "student_col_name",
+                              "comparison": "exact" | "greater" | "lesser" | "custom",
+                              "custom_comparison": { ... } # Optional
+                          }, ...
+                      }
+
+    Returns:
+        A dictionary where keys are scholarship identifiers. Each value is
+        another dictionary containing the scholarship's amount (keyed by
+        amount_identifier) and its requirements (keyed by the relevant
+        scholarship column names from compare_dict). Requirement values
+        are processed (e.g., split strings, custom substitutions).
+        Example:
+        {
+             "SCHOLARSHIP_A": {
+                 "Amount": 1000,
+                 "Major": ["Computer Science", "Engineering"],
+                 "GPA": 3.5
+             }, ...
+        }
     """
 
     # Fill nan columns with empty space
-    # Deal with deprecation warning
     data.fillna(value="", inplace=True)
 
     rows = data.iterrows()
@@ -68,6 +108,44 @@ def preprocess_scholarships(
 def preprocess_students(
     identifier: str, cap_identifier: str, compare_dict: dict, data: pd.DataFrame
 ) -> dict:
+    """
+    Processes student data from a DataFrame into a structured dictionary.
+
+    Transforms the student DataFrame into a dictionary where keys are student
+    identifiers. Each value is another dictionary containing the student's
+    maximum award cap (keyed by cap_identifier) and relevant attribute values
+    needed for scholarship comparison (keyed by the corresponding *scholarship* column names found in compare_dict). It fetches data from the correct
+    student column specified in compare_dict for each attribute.
+
+    Args:
+        identifier: The column name in 'data' that uniquely identifies
+                    each student.
+        cap_identifier: The column name in 'data' that specifies the
+                        student's maximum award amount (cap).
+        compare_dict: A dictionary mapping scholarship column names to their
+                      corresponding student column names and comparison types.
+                      See preprocess_scholarships docstring for structure.
+        data: A pandas DataFrame containing the raw student data.
+
+    Returns:
+        A dictionary where keys are student identifiers. Each value is
+        another dictionary containing the student's award cap and their
+        relevant attributes, keyed by the *scholarship* column names
+        they correspond to (as defined in compare_dict).
+        Example:
+        {
+            "STUDENT_123": {
+                "MaxAward": 5000,
+                "Major": "Computer Science", # Key is 'Major' (scholarship col)
+                "GPA": 3.8                 # Key is 'GPA' (scholarship col)
+            }, ...
+        }
+
+    Raises:
+        ValueError: If the essential 'identifier' or 'cap_identifier'
+                    columns are not found in the student data.
+    """
+
     # Fill nan columns with empty space
     data.fillna(
         value="", inplace=True
@@ -82,7 +160,8 @@ def preprocess_students(
 
         relevant_attributes = compare_dict.keys()
         for attr in relevant_attributes:
-            students[student_identifier][attr] = row[attr]
+            student_column_name = compare_dict[attr]["student_column"]
+            students[student_identifier][attr] = row[student_column_name]
 
     return students
 
@@ -121,6 +200,27 @@ def custom_matching(
     scholarship,
     attribute,
 ):
+    """
+    Checks if a student's value matches custom scholarship criteria.
+
+    Compares a specific attribute value of a student against a list of
+    custom matching values defined for a scholarship attribute. Performs a
+    case-insensitive comparison after stripping whitespace.
+
+    Args:
+        stu_dict: The dictionary containing processed student data.
+        student: The identifier of the student to check.
+        schol_dict: The dictionary containing processed scholarship data.
+        scholarship: The identifier of the scholarship to check against.
+        attribute: The specific attribute (scholarship column name)
+                   being compared.
+
+    Returns:
+        True if the student's value for the attribute is found within the
+        scholarship's list of custom matching values for that attribute,
+        False otherwise. Returns False if the attribute or required data
+        is missing.
+    """
     custom_matchings = [x.lower().strip() for x in schol_dict[scholarship][attribute]]
     student_val = stu_dict[student][attribute].lower().strip()
     if student_val in custom_matchings:
@@ -128,11 +228,27 @@ def custom_matching(
     return False
 
 
-# Potential bug: Student and Scholarship have same identifiers. Stupid but technically possible
+# Potential bug: Student and Scholarship have same identifiers (700# for both student and scholarships). Stupid but technically possible
 def create_nodes(
     stu_dict: dict,
     schol_dict: dict,
 ) -> nx.Graph:
+    """
+    Creates graph nodes for students and scholarships.
+
+    Initializes a NetworkX graph and adds a node for each student identifier
+    (from stu_dict keys) and each scholarship identifier (from schol_dict keys).
+
+    Args:
+        stu_dict: Dictionary of processed student data (keys are student IDs).
+        schol_dict: Dictionary of processed scholarship data (keys are
+                    scholarship IDs).
+
+    Returns:
+        A networkx.Graph object containing nodes representing all students
+        and scholarships.
+    """
+
     graph = nx.Graph()
     for student in stu_dict:
         graph.add_node(student)
@@ -149,6 +265,36 @@ def create_edges(
     compare_dict: dict,
     graph: nx.Graph,
 ) -> list[nx.Graph]:
+    """
+    Creates weighted edges between qualified students and scholarships in the graph.
+
+    Iterates through all student-scholarship pairs. For each pair, it checks
+    if the student meets all requirements of the scholarship based on the
+    comparison logic defined in compare_dict ('exact', 'greater', 'lesser',
+    'custom'). If a student qualifies for a scholarship, a weighted edge is
+    added to the graph between them. The edge weight is the minimum of the
+    scholarship amount and the student's remaining award cap. Finally, it
+    removes isolated nodes and returns a list of connected component subgraphs.
+
+    Args:
+        stu_dict: Dictionary of processed student data.
+        cap_identifier: Key for accessing the student's award cap in stu_dict.
+        schol_dict: Dictionary of processed scholarship data.
+        amount_identifier: Key for accessing the scholarship amount in schol_dict.
+        compare_dict: Dictionary defining comparison logic for attributes.
+        graph: The NetworkX graph (initially containing only nodes) to which
+               edges will be added.
+
+    Returns:
+        A list of networkx.Graph objects, where each graph is a connected
+        component of the original graph after adding qualified edges and
+        removing isolates. Returns an empty list if no edges are formed.
+
+    Raises:
+        ValueError: If numeric comparison fails due to non-numeric data that
+                    cannot be coerced, after attempting conversion.
+                    (Error handling added for graceful skips on ValueError).
+    """
     columns = compare_dict.keys()
 
     for scholarship in schol_dict:
@@ -223,6 +369,21 @@ def create_edges(
 
 
 def save_csv(headers, data, name: str):
+    """
+    Saves data to a CSV file, avoiding overwrites by appending numbers.
+
+    Writes the provided data rows to a CSV file with the given headers.
+    If a file with the specified base name already exists, it appends
+    '(1)', '(2)', etc., to the filename until an unused name is found.
+
+    Args:
+        headers: A tuple or list of strings for the CSV header row.
+        data: A list of lists, where each inner list represents a row of data.
+        name: The base name for the output CSV file (without extension).
+
+    Returns:
+        None
+    """
     i = 0
     while True:
         file_str = f"{name}.csv" if i == 0 else f"{name}({i}).csv"
@@ -236,16 +397,25 @@ def save_csv(headers, data, name: str):
             i += 1
 
 
-import os
-import re
-import traceback
+def load_file(path: str, custom=False) -> pd.DataFrame | None:
+    """
+    Loads data from an Excel (.xls, .xlsx) or CSV file into a pandas DataFrame.
 
-import pandas as pd
+    Handles basic path cleaning, identifies file extension, and attempts
+    to read the file using pandas. For CSV files, it tries multiple common
+    encodings (UTF-8, latin1, cp1252) if the default UTF-8 fails.
+    Provides informative print statements during loading and error handling.
 
+    Args:
+        path: The file path (string) to the data file. Handles paths
+              wrapped in quotes.
+        custom: If True, reads the file assuming *no header row* (header=None for pandas). Defaults to False (infer header).
 
-def load_file(
-    path: str, custom=False
-) -> pd.DataFrame | None:  # Added None to return type hint
+    Returns:
+        A pandas DataFrame containing the loaded data if successful.
+        None if the file is not found, the file type is unsupported,
+        or a critical loading error (e.g., encoding, parsing) occurs.
+    """
     path = re.sub('["]', "", path)
     file_extension = ""
     if "." in path:
@@ -322,11 +492,24 @@ def load_file(
         return None  # Return None on error
 
 
-# Need a way to identify column to identify students
-""" TO DO:
-* Process scholarship data. How will the comparisons be happening? Well, indexing a scholarship attribute should give acceptable student values
-"""
 if __name__ == "__main__":
+    """
+    Main execution script for the scholarship matching program.
+
+    Handles user input for file paths, loads data using load_file,
+    prepares the comparison dictionary based on user-provided mapping files,
+    processes student and scholarship data using the preprocess functions,
+    builds a bipartite graph, runs the max-weight matching algorithm iteratively
+    to assign scholarships to students respecting award caps and amounts,
+    prints a summary of matches, and saves the detailed results to a CSV file.
+    """
+
+    print(
+        "\n*****\nFor any questions you may have about this program refer to the documentation"
+    )
+    print(
+        "Additionally, feel free to contact me should there be any bugs, issues, or further questions\n*****\n"
+    )
     warnings.simplefilter(
         action="ignore", category=FutureWarning
     )  # Suppress the pandas warning
@@ -364,9 +547,7 @@ if __name__ == "__main__":
     cap_identifier = ""
 
     # Load the matching file
-    match_path = input(
-        "Provide comparison file for columns. Check the readme for more info on how to structure files for this program: "
-    )
+    match_path = input("Provide comparison file for columns: ")
 
     print()
 
@@ -423,20 +604,6 @@ if __name__ == "__main__":
                 compare_dict[key]["custom_comparison"][key_val] = values
 
     print()  # Add spacing before the next section
-
-    # Rename columns in student data if matches exist
-    rename_map = {}
-    for schol_col, mapping in compare_dict.items():
-        stu_col = mapping["student_column"]
-        if (
-            schol_col != stu_col
-            and schol_col in schol_columns
-            and stu_col in stu_columns
-        ):
-            rename_map[stu_col] = schol_col
-
-    if rename_map:
-        stu_data = stu_data.rename(columns=rename_map)
 
     # Process scholarships and students
     print("Processing Scholarships...")
@@ -562,4 +729,9 @@ if __name__ == "__main__":
 
     print(total)
 
+    # Files saved to directory containing the program file
     save_csv(headers, csv_data, "blossom_matches")
+
+    print("\nResults output to directory holding the application...")
+    print("Press any key to close ")
+    keyboard.read_event()
