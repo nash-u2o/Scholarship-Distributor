@@ -442,6 +442,7 @@ def load_file(path: str, custom=False) -> pd.DataFrame | None:
 
         # If data is successfully loaded by this point
         print("File loaded successfully into DataFrame.")
+        print()
         return data
 
     # --- Exception Handling Block ---
@@ -462,6 +463,7 @@ def load_file(path: str, custom=False) -> pd.DataFrame | None:
         print("-" * 20 + " Full Traceback " + "-" * 20)
         traceback.print_exc()  # Print the full traceback
         print("-" * 54)
+        print()
         return None  # Return None on error
 
 
@@ -495,8 +497,6 @@ if __name__ == "__main__":
         schol_file_path = input("Enter scholarship file path: ")
         schol_data = load_file(schol_file_path)
 
-    print()  # Add spacing between sections
-
     # Load student file
     while stu_data is None:
         stu_file_path = input("Enter student file path: ")
@@ -512,8 +512,6 @@ if __name__ == "__main__":
     stu_columns = [x for x in stu_data.columns]
     compare_dict = {}
 
-    print()  # Add spacing before the next section
-
     schol_identifier = ""
     amount_identifier = ""
     stu_identifier = ""
@@ -521,8 +519,6 @@ if __name__ == "__main__":
 
     # Load the matching file
     match_path = input("Provide comparison file for columns: ")
-
-    print()
 
     match_data = load_file(match_path, True)
     match_data = match_data.map(lambda x: x.lower() if isinstance(x, str) else x)
@@ -560,7 +556,6 @@ if __name__ == "__main__":
             comparison_file = input(
                 f"Provide the comparison file for the scholarship column '{key}': "
             )
-            print()
             data = load_file(comparison_file, True)
             data.columns = ["scholarship", "student"]
             for index, row in data.iterrows():
@@ -575,8 +570,6 @@ if __name__ == "__main__":
                 ):  # Also add in the key itself to be safe
                     values.append(row["scholarship"].lower())
                 compare_dict[key]["custom_comparison"][key_val] = values
-
-    print()  # Add spacing before the next section
 
     # Process scholarships and students
     print("Processing Scholarships...")
